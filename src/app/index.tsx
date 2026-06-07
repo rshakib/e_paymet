@@ -1,98 +1,66 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import React, { useState, useEffect } from 'react';
+import { View, ActivityIndicator } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+import DashboardScreen from '../screens/dashboard/DashboardScreen';
+import LoginScreen from './login';
+import { globalSession } from '../constants/auth';
+import { setAuthToken } from '../services/api';
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+export default function Index() {
+  const [isReady, setIsReady] = useState(false);
+  const [loggedIn, setLoggedIn] = useState(globalSession.isLoggedIn);
+  
+  useEffect(() => {
+    const rehydrate = async () => {
+      try {
+        const token = await SecureStore.getItemAsync('niropay_auth_token');
+        const profileStr = await SecureStore.getItemAsync('niropay_user_profile');
 
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
+        if (token && profileStr) {
+          const profile = JSON.parse(profileStr);
+          globalSession.registeredUser = profile;
+          globalSession.isLoggedIn = true;
+          setAuthToken(token);
+          setLoggedIn(true);
+          console.log("[AUTH] Session rehydrated for:", profile.username);
+        }
+      } catch (e) {
+        console.error("[AUTH] Rehydration failed", e);
+      } finally {
+        setIsReady(true);
+      }
+    };
+
+    rehydrate();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (globalSession.isLoggedIn !== loggedIn) {
+        setLoggedIn(globalSession.isLoggedIn);
+      }
+    }, 200);
+    return () => clearInterval(interval);
+  }, [loggedIn]);
+
+  if (!isReady) {
     return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0A1F44' }}>
+        <ActivityIndicator size="large" color="#00C2FF" />
+      </View>
     );
   }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
-  return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
-  );
+
+  if (!loggedIn) {
+    return (
+      <LoginScreen 
+        onLoginSuccess={() => {
+          globalSession.isLoggedIn = true;
+          setLoggedIn(true);
+        }} 
+      />
+    );
+  }
+
+  return <DashboardScreen />;
 }
-
-export default function HomeScreen() {
-  return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
-
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
-
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
-
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
-  );
-}
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
-  },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
-  },
-  title: {
-    textAlign: 'center',
-  },
-  code: {
-    textTransform: 'uppercase',
-  },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
-  },
-});

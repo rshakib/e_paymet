@@ -1,0 +1,122 @@
+========================================================
+FYDP PROJECT - SECURE MOBILE PAYMENT APP
+FULL CONTEXT FOR NEW CONVERSATION
+========================================================
+
+YOU ARE: Claude (acting as the Brain/Controller)
+USER ROLE: Copy-paste executor using Gemini CLI
+GEMINI CLI ROLE: Code executor (hands)
+
+WORKFLOW AGREEMENT:
+- Claude gives small step-by-step instructions
+- User copies the instruction into Gemini CLI
+- Gemini CLI executes the code
+- Claude tells user when and what to write in master.md
+- One feature at a time → Test → Confirm → Next
+
+========================================================
+FULL PROJECT SCENARIO
+========================================================
+
+Secure Mobile Payment App – Full System Scenario
+
+The application will support both Bangla and English languages. A language switch option will be available at the top-right corner, and the app interface will dynamically change based on the user's selected language.
+
+To use the service, a user must first visit a bank physically and provide their National ID (NID), mobile number (must be unique), device MAC address, and other identity verification details. After successful verification, the bank will provide a one-time activation code.
+
+After that, the user will install the mobile application. When opening the app, the user will be taken to the login page. Login requires username, a 4–6 digit PIN, and biometric authentication (fingerprint). Since new users do not have an account, they must register first.
+
+During registration, the user will provide NID number (must be unique), mobile number (must be unique), full name, username (must be unique), password (PIN), fingerprint biometric, and face authentication (only for registration). The MAC address will be automatically collected by the app. For now, NID validation will be based on length according to Bangladesh standards. In future, it will be verified with the Bangladesh government server.
+
+IMPORTANT IMPLEMENTATION NOTE: 
+Face authentication and fingerprint biometric must be fully implemented in the system from the beginning. However, during the testing phase, only the PIN will be actively used for authentication. Biometric and face authentication should remain implemented but temporarily disabled. When instructed, the system must be able to enable biometric and face authentication instantly without requiring major code changes.
+
+DEVICE BINDING RULE (VERY IMPORTANT):
+Each account must be bound to a single device using the MAC address (one MAC address = one device = one account usage). This logic must be fully implemented in the system. However, during the testing phase, this restriction will remain temporarily disabled to allow testing on multiple devices. When required, this restriction must be enabled instantly without major code changes, and after enabling, the account must strictly work on only one device.
+
+After successful registration, the user will be redirected to the login page. The user will log in using username, PIN, and biometric authentication. Once logged in, the user does not need to enter the username repeatedly. After logout, login can be done using only PIN and biometric.
+
+After login, the user will see the dashboard. The dashboard design MUST be exactly the same as the provided PNG image without any modification. No UI changes are allowed. Only one additional feature is permitted: a Cash Out button. All layout, spacing, icons, colors, and structure must strictly match the given design.
+
+The dashboard will display current balance, quick action buttons (Send Money, Mobile Recharge, Make Payment, Pay Bill, Tickets), and recent transactions (last 2–3).
+
+In the Send Money feature, the user will enter username or mobile number, amount, and must provide authentication (currently PIN only during testing; later PIN + biometric). The system will check whether the username exists. Users can also select numbers from their contact list, search by name or number, and if the number is linked to an account, the username will be shown. Otherwise, an error message will be displayed. After a successful transaction, a confirmation page will appear, and then the user will return to the dashboard.
+
+In Mobile Recharge, the user can enter a number manually or select from contacts. Suggestions will appear while typing. The user will select a Bangladeshi operator, enter the amount, and confirm using authentication (currently PIN only during testing). After success, the user returns to the dashboard.
+
+Cash Out is only possible through the bank. The user must provide PIN, face authentication, and biometric verification (during testing phase only PIN may be used, but full system must support all). Then a temporary code will be generated, which must be shown to a bank officer. The code will remain valid for 5 minutes.
+
+In Make Payment, the user can use username, mobile number, or QR code scan. Payment confirmation requires authentication (currently PIN only; later PIN + biometric).
+
+In Pay Bill, the user will enter organization name or number or use QR scan. Categories include electricity, water, internet, education, and others. Payment requires authentication (currently PIN only; later PIN + biometric).
+
+In Tickets, the user will provide name, amount, and QR and confirm using authentication (currently PIN only; later PIN + biometric).
+
+Bank Transfer, Savings, and My Cards will function similar to services like bKash, Nagad, and Rocket, requiring authentication (currently PIN only; later PIN + biometric).
+
+In the Profile section, users can upload a profile picture, verify Gmail, and change display name (only for UI, not server data). NID-based details will be shown as masked (XX XX) for now and marked as an upcoming feature. The application will also support both dark mode and light mode.
+
+The app will include QR functionality such as scanning QR codes for payments and generating a personal QR code (biometric supported, can be enabled later).
+
+The Transactions section will display all transactions from the last one month and allow filtering by category.
+
+Each feature page will display the last 2–3 recent transactions. After every successful action, the user will be redirected back to the dashboard through a confirmation page.
+
+CRITICAL SECURITY REQUIREMENT:
+All system design, data storage, authentication, and transaction workflows MUST strictly follow the provided PDF (Secure Transaction Simulation). The PDF must be followed exactly without any deviation. All cryptographic implementations such as AES-256 encryption, HMAC for data integrity, and timestamp with nonce for replay attack prevention must be implemented exactly as defined in the PDF. No security logic should be implemented outside of or in contradiction to the PDF design.
+
+========================================================
+TECH STACK
+========================================================
+
+Frontend : React Native + Expo + TypeScript
+Backend  : FastAPI (Python)
+Database : Cloud-hosted MySQL
+Auth     : JWT + bcrypt + TLS/HTTPS
+Security : AES-256, HMAC, Replay attack prevention (timestamp + nonce)
+Biometric: Fingerprint + Face (disabled during testing)
+
+========================================================
+FEATURE DEVELOPMENT ORDER
+========================================================
+
+1.  Project setup
+2.  Registration system
+3.  Login system
+4.  Dashboard (exact PNG match required)
+5.  Send Money
+6.  Mobile Recharge
+7.  Make Payment
+8.  Pay Bill
+9.  Tickets
+10. Cash Out
+11. Profile
+12. QR system
+13. Transactions history
+
+========================================================
+IMPORTANT RULES
+========================================================
+
+- Dashboard UI = EXACTLY match the PNG provided (no deviation)
+- Security = EXACTLY follow the PDF provided
+- Mobile number, NID, username = MUST be UNIQUE
+- One account = One device (MAC binding — disabled during testing)
+- Biometric + Face = implemented but DISABLED during testing
+- When user says "Enable biometric now" → enable instantly
+
+========================================================
+ATTACHED FILES (user will provide in this conversation)
+========================================================
+
+- dashboard.png  → Exact UI reference for dashboard
+- security.pdf   → Secure Transaction Simulation (must follow strictly)
+- master.md      → Current progress tracker (if resuming work)
+
+========================================================
+NOTE TO CLAUDE
+========================================================
+
+Read the attached PNG and PDF carefully before starting.
+Check master.md to understand current progress.
+Then continue from where we left off — one small step at a time.
