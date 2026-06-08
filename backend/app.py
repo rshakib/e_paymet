@@ -1018,9 +1018,9 @@ async def search_users(q: str, username_from_token: str = Depends(get_current_us
         query_pattern = f"%{q}%"
         or_filter = f"username.ilike.{query_pattern},full_name.ilike.{query_pattern},mobile_number.ilike.{query_pattern}"
         
-        response = supabase.table('users').select('id, username, full_name, mobile_number')\
-            .or_(or_filter)\
-            .neq('username', username_from_token)\
+        query = supabase.table('users').select('id, username, full_name, mobile_number')
+        query.params = query.params.add("or", f"({or_filter})")
+        response = query.neq('username', username_from_token)\
             .limit(15)\
             .execute()
         
@@ -1060,9 +1060,9 @@ async def match_contacts(data: ContactsMatchRequest, username_from_token: str = 
             or_conditions.append(f"username.ilike.%{num}")
         or_filter_str = ",".join(or_conditions)
 
-        response = supabase.table('users').select('id, username, full_name, mobile_number')\
-            .or_(or_filter_str)\
-            .neq('username', username_from_token)\
+        query = supabase.table('users').select('id, username, full_name, mobile_number')
+        query.params = query.params.add("or", f"({or_filter_str})")
+        response = query.neq('username', username_from_token)\
             .limit(100)\
             .execute()
         
