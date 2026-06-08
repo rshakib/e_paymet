@@ -8,7 +8,7 @@ import os
 from dotenv import load_dotenv
 from typing import Optional, Dict
 from pydantic import BaseModel
-import psycopg2
+# psycopg2 removed
 import traceback
 from contextlib import asynccontextmanager
 
@@ -40,250 +40,14 @@ if missing_vars:
     print("=" * 60)
     raise RuntimeError(error_msg)
 
-# Database connection details
-PROJECT_ID = SUPABASE_URL.split('//')[1].split('.')[0]
-DB_HOST = f"db.{PROJECT_ID}.supabase.co"
-DB_NAME = "postgres"
-DB_USER = "postgres"
-DB_PORT = "5432"
-
 def init_db():
-    """Initialize database tables using psycopg2"""
-    try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        
-        # Create profiles table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS profiles (
-                id UUID PRIMARY KEY,
-                registration_number TEXT UNIQUE NOT NULL,
-                password_key_k2 TEXT NOT NULL,
-                fingerprint_bp TEXT NOT NULL,
-                hmac_key_k1 TEXT NOT NULL,
-                last_t BIGINT DEFAULT 0,
-                daily_limit FLOAT DEFAULT 5000.0,
-                today_spent FLOAT DEFAULT 0.0,
-                last_spent_reset_date DATE DEFAULT CURRENT_DATE,
-                nid TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Migration: Check if timestamp_t exists and rename to last_t
-        cur.execute("""
-            DO $$ 
-            BEGIN 
-                IF EXISTS (SELECT 1 FROM information_schema.columns 
-                           WHERE table_name='profiles' AND column_name='timestamp_t') THEN
-                    ALTER TABLE profiles RENAME COLUMN timestamp_t TO last_t;
-                    ALTER TABLE profiles ALTER COLUMN last_t TYPE BIGINT USING (
-                        CASE 
-                            WHEN last_t ~ '^[0-9]+$' THEN last_t::BIGINT 
-                            ELSE 0 
-                        END
-                    );
-                END IF;
-                
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='profiles' AND column_name='last_spent_reset_date') THEN
-                    ALTER TABLE profiles ADD COLUMN last_spent_reset_date DATE DEFAULT CURRENT_DATE;
-                END IF;
-
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='profiles' AND column_name='nid') THEN
-                    ALTER TABLE profiles ADD COLUMN nid TEXT;
-                END IF;
-
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='profiles' AND column_name='full_name') THEN
-                    ALTER TABLE profiles ADD COLUMN full_name TEXT;
-                END IF;
-
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='profiles' AND column_name='mobile_number') THEN
-                    ALTER TABLE profiles ADD COLUMN mobile_number TEXT;
-                END IF;
-
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='profiles' AND column_name='has_fingerprint') THEN
-                    ALTER TABLE profiles ADD COLUMN has_fingerprint BOOLEAN DEFAULT FALSE;
-                END IF;
-
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='profiles' AND column_name='has_face_id') THEN
-                    ALTER TABLE profiles ADD COLUMN has_face_id BOOLEAN DEFAULT FALSE;
-                END IF;
-            END $$;
-        """)
-
-        # Register Atomic Stored Procedure
-        cur.execute("""
-            CREATE OR REPLACE FUNCTION process_transfer_secure(
-                p_sender_username TEXT,
-                p_receiver_username TEXT,
-                p_amount DOUBLE PRECISION,
-                p_timestamp BIGINT,
-                p_reference TEXT
-            ) RETURNS JSON AS $$
-            DECLARE
-                v_sender_profile RECORD;
-                v_receiver_profile RECORD;
-                v_sender_account RECORD;
-                v_receiver_account RECORD;
-                v_today DATE;
-                v_current_spent DOUBLE PRECISION;
-            BEGIN
-                -- 1. Fetch profiles with locking
-                SELECT * INTO v_sender_profile FROM profiles WHERE registration_number = p_sender_username FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Sender profile not found');
-                END IF;
-
-                SELECT * INTO v_receiver_profile FROM profiles WHERE registration_number = p_receiver_username FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Receiver profile not found');
-                END IF;
-
-                -- 2. Fetch accounts with locking
-                SELECT * INTO v_sender_account FROM accounts WHERE profile_id = v_sender_profile.id AND is_active = TRUE FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Sender account not found');
-                END IF;
-
-                SELECT * INTO v_receiver_account FROM accounts WHERE profile_id = v_receiver_profile.id AND is_active = TRUE FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Receiver account not found');
-                END IF;
-
-                -- 3. Balance verification
-                IF v_sender_account.balance < p_amount THEN
-                    INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
-                    VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Insufficient balance', p_reference);
-                    RETURN json_build_object('status', 'futile', 'message', 'Insufficient balance');
-                END IF;
-
-                -- 4. Daily Limit validation & Reset check
-                v_today := CURRENT_DATE;
-                IF v_sender_profile.last_spent_reset_date IS NULL OR v_sender_profile.last_spent_reset_date < v_today THEN
-                    v_current_spent := 0.0;
-                    UPDATE profiles SET today_spent = 0.0, last_spent_reset_date = v_today WHERE id = v_sender_profile.id;
-                ELSE
-                    v_current_spent := v_sender_profile.today_spent;
-                END IF;
-
-                IF v_current_spent + p_amount > v_sender_profile.daily_limit THEN
-                    INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
-                    VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Daily limit exceeded', p_reference);
-                    RETURN json_build_object('status', 'error', 'message', 'Daily limit exceeded');
-                END IF;
-
-                -- 5. Replay protection (DB level check)
-                IF p_timestamp <= v_sender_profile.last_t THEN
-                    INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
-                    VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Replay attack detected (T <= Last_T)', p_reference);
-                    RETURN json_build_object('status', 'error', 'message', 'Replay attack detected');
-                END IF;
-
-                -- 6. Apply balances
-                UPDATE accounts SET balance = balance - p_amount WHERE id = v_sender_account.id;
-                UPDATE accounts SET balance = balance + p_amount WHERE id = v_receiver_account.id;
-
-                -- 7. Update profile
-                UPDATE profiles SET 
-                    last_t = p_timestamp, 
-                    today_spent = v_current_spent + p_amount,
-                    last_spent_reset_date = v_today
-                WHERE id = v_sender_profile.id;
-
-                -- 8. Insert success log
-                INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, reference)
-                VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'success', p_reference);
-
-                RETURN json_build_object(
-                    'status', 'success',
-                    'message', 'Transfer successful',
-                    'new_balance', v_sender_account.balance - p_amount,
-                    'new_t', p_timestamp
-                );
-            END;
-            $$ LANGUAGE plpgsql;
-        """)
-
-        
-        # Create accounts table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                profile_id UUID REFERENCES profiles(id),
-                balance FLOAT DEFAULT 0.0,
-                is_active BOOLEAN DEFAULT TRUE,
-                account_number TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        
-        # Create transactions table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                sender_account_id UUID REFERENCES accounts(id),
-                receiver_account_id UUID REFERENCES accounts(id),
-                amount FLOAT NOT NULL,
-                status TEXT NOT NULL,
-                failure_reason TEXT,
-                reference TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Create bills table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS bills (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                profile_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-                biller_name TEXT NOT NULL,
-                bill_number TEXT NOT NULL,
-                amount FLOAT NOT NULL,
-                due_date DATE NOT NULL,
-                status TEXT NOT NULL DEFAULT 'unpaid',
-                paid_at TIMESTAMP WITH TIME ZONE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Seed bills for existing profiles if they don't have any
-        cur.execute("SELECT id, registration_number FROM profiles;")
-        profiles_list = cur.fetchall()
-        for prof in profiles_list:
-            prof_id = prof[0]
-            cur.execute("SELECT COUNT(*) FROM bills WHERE profile_id = %s;", (prof_id,))
-            bill_count = cur.fetchone()[0]
-            if bill_count == 0:
-                cur.execute("""
-                    INSERT INTO bills (profile_id, biller_name, bill_number, amount, due_date, status)
-                    VALUES 
-                    (%s, 'DESCO Electricity', 'BILL-E-5910', 850.50, CURRENT_DATE + INTERVAL '10 days', 'unpaid'),
-                    (%s, 'Link3 Internet', 'BILL-I-8802', 1200.00, CURRENT_DATE + INTERVAL '15 days', 'unpaid');
-                """, (prof_id, prof_id))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("Database tables initialized successfully")
-    except Exception as e:
-        print(f"Error initializing database: {e}")
+    """Database tables initialization disabled for Render deployment"""
+    pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB
-    init_db()
+    # Initialize DB - Disabled direct PostgreSQL init_db() on startup
+    # init_db()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -346,12 +110,43 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
 # ========================================
 
 def get_user_profile(username):
-    """Fetch user profile from Supabase profiles table"""
+    """Fetch user profile by joining users and profiles tables"""
     try:
-        response = supabase.table('profiles').select('*').eq('registration_number', username).execute()
-        if response.data and len(response.data) > 0:
-            return response.data[0]
-        return None
+        # Fetch from users table first
+        user_res = supabase.table('users').select('*').eq('username', username).execute()
+        if not user_res.data or len(user_res.data) == 0:
+            return None
+        user = user_res.data[0]
+        
+        # Fetch from profiles table using user_nid
+        profile_res = supabase.table('profiles').select('*').eq('user_nid', user['nid']).execute()
+        profile_data = profile_res.data[0] if (profile_res.data and len(profile_res.data) > 0) else {}
+        
+        # Merge them
+        merged = {
+            'id': user['id'],
+            'username': user['username'],
+            'k2_stretched': user['k2_stretched'],
+            'password_key_k2': user['k2_stretched'], # fallback
+            'bp_hash': user['bp_hash'],
+            'fingerprint_bp': user['bp_hash'], # fallback
+            'k1': user['k1'],
+            'hmac_key_k1': user['k1'], # fallback
+            'last_t': user.get('last_t', 0),
+            'daily_limit': 5000.0,
+            'today_spent': 0.0,
+            'last_spent_reset_date': profile_data.get('last_spent_reset_date'),
+            'nid': user.get('nid'),
+            'full_name': user.get('full_name') or 'User',
+            'mobile_number': user.get('mobile_number') or '',
+            'biometric_registered': user.get('biometric_registered', False),
+            'has_fingerprint': user.get('biometric_registered', False), # fallback
+            'face_registered': user.get('face_registered', False),
+            'has_face_id': user.get('face_registered', False), # fallback
+            'profile_picture_url': profile_data.get('profile_picture_url'),
+            'favorites': profile_data.get('favorites', [])
+        }
+        return merged
     except Exception as e:
         print(f"Error fetching profile: {e}")
         return None
@@ -405,9 +200,9 @@ def update_account_balance(account_id, new_balance):
         return False
 
 def update_profile_timestamp(profile_id, new_t):
-    """Update user's timestamp (T) in Supabase"""
+    """Update user's timestamp (T) in Supabase users table"""
     try:
-        supabase.table('profiles').update({'last_t': new_t}).eq('id', profile_id).execute()
+        supabase.table('users').update({'last_t': new_t}).eq('id', profile_id).execute()
         return True
     except Exception as e:
         print(f"Error updating timestamp: {e}")
@@ -456,7 +251,7 @@ async def login(data: LoginRequest):
                 # If we have an NID, we can migrate them now
                 if nid:
                     new_k2 = crypto.stretch_password(password, nid)
-                    supabase.table('profiles').update({'password_key_k2': new_k2}).eq('id', user_profile['id']).execute()
+                    supabase.table('users').update({'k2_stretched': new_k2}).eq('id', user_profile['id']).execute()
                     migrated = True
                     print(f"User {username} migrated to stretched password during login.")
 
@@ -477,10 +272,10 @@ async def login(data: LoginRequest):
             "migrated": migrated,
             "user": {
                 "id": user_profile['id'],
-                "username": user_profile['registration_number'],
-                "k1": user_profile['hmac_key_k1'],
+                "username": user_profile['username'],
+                "k1": user_profile['k1'],
                 "k2": stored_k2 if not migrated else new_k2,
-                "bp": user_profile['fingerprint_bp'],
+                "bp": user_profile['bp_hash'],
                 "last_t": user_profile['last_t'],
                 "balance": float(user_account['balance']),
                 "accountId": user_account['id'],
@@ -623,7 +418,7 @@ async def get_user(username: str, username_from_token: str = Depends(get_current
             "status": "success",
             "user": {
                 "id": user_profile['id'],
-                "username": user_profile['registration_number'],
+                "username": user_profile['username'],
                 "balance": float(user_account['balance']),
                 "daily_limit": float(user_profile['daily_limit']),
                 "today_spent": float(user_profile['today_spent']),
@@ -672,9 +467,9 @@ async def get_transactions(username: str, username_from_token: str = Depends(get
                 if txn.get('receiver_account_id'):
                     receiver_account = supabase.table('accounts').select('profile_id').eq('id', txn['receiver_account_id']).execute()
                     if receiver_account.data:
-                        receiver_profile = supabase.table('profiles').select('registration_number').eq('id', receiver_account.data[0]['profile_id']).execute()
-                        if receiver_profile.data:
-                            receiver_name = receiver_profile.data[0]['registration_number']
+                        receiver_profile = supabase.table('users').select('username').eq('id', receiver_account.data[0]['profile_id']).execute()
+                        if receiver_profile.data and len(receiver_profile.data) > 0:
+                            receiver_name = receiver_profile.data[0]['username']
                 
                 # Categorize based on reference
                 category = 'transfer'
@@ -705,9 +500,9 @@ async def get_transactions(username: str, username_from_token: str = Depends(get
                 if txn.get('sender_account_id'):
                     sender_account = supabase.table('accounts').select('profile_id').eq('id', txn['sender_account_id']).execute()
                     if sender_account.data:
-                        sender_profile = supabase.table('profiles').select('registration_number').eq('id', sender_account.data[0]['profile_id']).execute()
-                        if sender_profile.data:
-                            sender_name = sender_profile.data[0]['registration_number']
+                        sender_profile = supabase.table('users').select('username').eq('id', sender_account.data[0]['profile_id']).execute()
+                        if sender_profile.data and len(sender_profile.data) > 0:
+                            sender_name = sender_profile.data[0]['username']
                 
                 # Categorize based on reference
                 category = 'transfer'
@@ -785,22 +580,45 @@ async def register(data: RegisterRequest):
         
         last_t = 0
 
+        # Insert into users table
+        user_data = {
+            'id': auth_user_id,
+            'nid': nid,
+            'full_name': 'User',
+            'username': username,
+            'mobile_number': '',
+            'activation_code': activation_code,
+            'bp_hash': bp_hash,
+            'k1': k1,
+            'k2_stretched': k2_stretched,
+            'last_t': last_t,
+            'balance': 0.0,
+            'face_registered': False,
+            'biometric_registered': False
+        }
+
+        user_response = supabase.table('users').insert(user_data).execute()
+        if not user_response.data:
+            # Clean up orphaned auth user
+            try:
+                supabase.auth.admin.delete_user(auth_user_id)
+            except Exception:
+                pass
+            return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to create user"})
+
+        # Insert into profiles table (approved schema)
         profile_data = {
             'id': auth_user_id,
-            'registration_number': username,
-            'password_key_k2': k2_stretched,
-            'fingerprint_bp': bp_hash,
-            'hmac_key_k1': k1,
-            'last_t': last_t,
-            'daily_limit': 5000.0,
-            'today_spent': 0.0,
-            'nid': nid
+            'user_nid': nid,
+            'profile_picture_url': None,
+            'favorites': []
         }
 
         response = supabase.table('profiles').insert(profile_data).execute()
         if not response.data:
-            # Clean up orphaned auth user
+            # Clean up users record and auth user
             try:
+                supabase.table('users').delete().eq('id', auth_user_id).execute()
                 supabase.auth.admin.delete_user(auth_user_id)
             except Exception:
                 pass
@@ -832,7 +650,7 @@ async def check_receiver(username: str, username_from_token: str = Depends(get_c
             return JSONResponse(status_code=404, content={"status": "error", "message": "Receiver not found"})
         return {
             "status": "success",
-            "username": profile['registration_number'],
+            "username": profile['username'],
             "full_name": profile.get('full_name') or '',
             "role": profile.get('role') or 'user'
         }
@@ -897,30 +715,49 @@ async def auth_register(envelope: SecureEnvelope):
         
         last_t = 0
 
-        profile_data = {
+        # Insert into users table
+        user_data = {
             'id': auth_user_id,
-            'registration_number': username,
-            'password_key_k2': k2_stretched,
-            'fingerprint_bp': bp_hash,
-            'hmac_key_k1': k1,
-            'last_t': last_t,
-            'daily_limit': 5000.0,
-            'today_spent': 0.0,
             'nid': nid,
             'full_name': full_name,
+            'username': username,
             'mobile_number': mobile_number,
-            'has_fingerprint': has_fingerprint,
-            'has_face_id': has_face_id
+            'activation_code': activation_code,
+            'bp_hash': bp_hash,
+            'k1': k1,
+            'k2_stretched': k2_stretched,
+            'last_t': last_t,
+            'balance': 0.0,
+            'face_registered': has_face_id,
+            'biometric_registered': has_fingerprint
         }
 
-        response = supabase.table('profiles').insert(profile_data).execute()
-        if not response.data:
+        user_response = supabase.table('users').insert(user_data).execute()
+        if not user_response.data:
             # Clean up orphaned auth user
             try:
                 supabase.auth.admin.delete_user(auth_user_id)
             except Exception:
                 pass
-            return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to create profile"})
+            return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to create user record"})
+
+        # Insert into profiles table (approved schema)
+        profile_data = {
+            'id': auth_user_id,
+            'user_nid': nid,
+            'profile_picture_url': None,
+            'favorites': []
+        }
+
+        response = supabase.table('profiles').insert(profile_data).execute()
+        if not response.data:
+            # Clean up users record and auth user
+            try:
+                supabase.table('users').delete().eq('id', auth_user_id).execute()
+                supabase.auth.admin.delete_user(auth_user_id)
+            except Exception:
+                pass
+            return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to create profile record"})
 
         profile_id = response.data[0]['id']
 
@@ -980,7 +817,7 @@ async def auth_login(envelope: SecureEnvelope):
                 # If we have an NID, we can migrate them now
                 if nid:
                     new_k2 = crypto.stretch_password(password, nid)
-                    supabase.table('profiles').update({'password_key_k2': new_k2}).eq('id', user_profile['id']).execute()
+                    supabase.table('users').update({'k2_stretched': new_k2}).eq('id', user_profile['id']).execute()
                     migrated = True
                     print(f"User {username} migrated to stretched password during login.")
 
@@ -999,7 +836,7 @@ async def auth_login(envelope: SecureEnvelope):
             "access_token": token,
             "user": {
                 "id": user_profile['id'],
-                "username": user_profile['registration_number'],
+                "username": user_profile['username'],
                 "full_name": user_profile.get('full_name') or 'User',
                 "balance": float(user_account['balance']),
                 "has_fingerprint": bool(user_profile.get('has_fingerprint', False)),
@@ -1129,9 +966,9 @@ async def auth_transfer(envelope: SecureEnvelope):
                 }
                 return crypto.encrypt_outer_envelope(response_data, SECRET_KEY)
             elif result['status'] == 'futile':
-                return JSONResponse(status_code=400, content={"status": "futile", "message": result['message']})
+                return JSONResponse(status_code=400, content={"status": "futile", "message": result['msg']})
             else:
-                return JSONResponse(status_code=403, content={"status": "error", "message": result['message']})
+                return JSONResponse(status_code=403, content={"status": "error", "message": result['msg']})
 
         except Exception as rpc_err:
             print(f"RPC Error: {rpc_err}")
@@ -1178,35 +1015,24 @@ async def get_operators():
 async def search_users(q: str, username_from_token: str = Depends(get_current_user)):
     """Search for users in database by query string q (username, full_name, mobile_number)"""
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
         query_pattern = f"%{q}%"
-        cur.execute("""
-            SELECT id, registration_number, full_name, mobile_number 
-            FROM profiles 
-            WHERE (registration_number ILIKE %s OR full_name ILIKE %s OR mobile_number ILIKE %s)
-              AND registration_number != %s
-            LIMIT 15;
-        """, (query_pattern, query_pattern, query_pattern, username_from_token))
+        or_filter = f"username.ilike.{query_pattern},full_name.ilike.{query_pattern},mobile_number.ilike.{query_pattern}"
         
-        results = cur.fetchall()
-        cur.close()
-        conn.close()
+        response = supabase.table('users').select('id, username, full_name, mobile_number')\
+            .or_(or_filter)\
+            .neq('username', username_from_token)\
+            .limit(15)\
+            .execute()
         
         users_list = []
-        for r in results:
-            users_list.append({
-                "id": r[0],
-                "username": r[1],
-                "full_name": r[2] or '',
-                "mobile_number": r[3] or ''
-            })
+        if response.data:
+            for r in response.data:
+                users_list.append({
+                    "id": r.get('id'),
+                    "username": r.get('username'),
+                    "full_name": r.get('full_name') or '',
+                    "mobile_number": r.get('mobile_number') or ''
+                })
             
         return {"status": "success", "users": users_list}
     except Exception as e:
@@ -1228,38 +1054,27 @@ async def match_contacts(data: ContactsMatchRequest, username_from_token: str = 
             return {"status": "success", "matched_users": []}
 
         # 2. Query matching profiles
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT id, registration_number, full_name, mobile_number 
-            FROM profiles 
-            WHERE registration_number != %s 
-              AND (
-                RIGHT(COALESCE(mobile_number, ''), 10) = ANY(%s)
-                OR RIGHT(COALESCE(registration_number, ''), 10) = ANY(%s)
-              )
-            LIMIT 100;
-        """, (username_from_token, last_10_list, last_10_list))
-        
-        results = cur.fetchall()
-        cur.close()
-        conn.close()
+        or_conditions = []
+        for num in last_10_list:
+            or_conditions.append(f"mobile_number.ilike.%{num}")
+            or_conditions.append(f"username.ilike.%{num}")
+        or_filter_str = ",".join(or_conditions)
+
+        response = supabase.table('users').select('id, username, full_name, mobile_number')\
+            .or_(or_filter_str)\
+            .neq('username', username_from_token)\
+            .limit(100)\
+            .execute()
         
         matched = []
-        for r in results:
-            matched.append({
-                "id": r[0],
-                "username": r[1],
-                "full_name": r[2] or '',
-                "mobile_number": r[3] or ''
-            })
+        if response.data:
+            for r in response.data:
+                matched.append({
+                    "id": r.get('id'),
+                    "username": r.get('username'),
+                    "full_name": r.get('full_name') or '',
+                    "mobile_number": r.get('mobile_number') or ''
+                })
             
         return {"status": "success", "matched_users": matched}
     except Exception as e:
@@ -1277,36 +1092,25 @@ async def get_bills(username: str, username_from_token: str = Depends(get_curren
         if not user_profile:
             return JSONResponse(status_code=404, content={"status": "error", "message": "User not found"})
             
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, biller_name, bill_number, amount, due_date::text, status, paid_at::text
-            FROM bills
-            WHERE profile_id = %s
-            ORDER BY created_at DESC;
-        """, (user_profile['id'],))
-        
-        bills_data = cur.fetchall()
-        cur.close()
-        conn.close()
+        response = supabase.table('bills').select('id, biller_name, bill_number, amount, due_date, status, paid_at')\
+            .eq('profile_id', user_profile['id'])\
+            .order('created_at', desc=True)\
+            .execute()
         
         bills_list = []
-        for b in bills_data:
-            bills_list.append({
-                "id": b[0],
-                "biller_name": b[1],
-                "bill_number": b[2],
-                "amount": float(b[3]),
-                "due_date": b[4],
-                "status": b[5],
-                "paid_at": b[6]
-            })
+        if response.data:
+            for b in response.data:
+                due_date_val = b.get('due_date')
+                paid_at_val = b.get('paid_at')
+                bills_list.append({
+                    "id": b.get('id'),
+                    "biller_name": b.get('biller_name'),
+                    "bill_number": b.get('bill_number'),
+                    "amount": float(b.get('amount')) if b.get('amount') is not None else 0.0,
+                    "due_date": str(due_date_val) if due_date_val is not None else '',
+                    "status": b.get('status'),
+                    "paid_at": str(paid_at_val) if paid_at_val is not None else None
+                })
             
         return {"status": "success", "bills": bills_list}
     except Exception as e:
